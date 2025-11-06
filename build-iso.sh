@@ -136,6 +136,13 @@ configure_repositories() {
   
   msg_info "Setting block size to 1024K"
   sudo sed -i 's/256K/1024K/g' /usr/lib/manjaro-tools/util-iso.sh
+
+  # Enable parallel downloads for faster build
+  msg_info "Enabling parallel downloads (10 simultaneous)"
+  sudo sed -i '/ParallelDownloads/s/#//' "$PATH_MANJARO_TOOLS/pacman-default.conf"
+  sudo sed -i '/ParallelDownloads/s/ParallelDownloads =.*/ParallelDownloads = 10/' "$PATH_MANJARO_TOOLS/pacman-default.conf"
+  sudo sed -i '/ParallelDownloads/s/#//' "$PATH_MANJARO_TOOLS/pacman-multilib.conf"
+  sudo sed -i '/ParallelDownloads/s/ParallelDownloads =.*/ParallelDownloads = 10/' "$PATH_MANJARO_TOOLS/pacman-multilib.conf"
 }
 
 # Add repository configurations to pacman.conf files
