@@ -171,6 +171,7 @@ add_repositories_to_pacman() {
   # Configure BigLinux repositories after (lower priority)
   case "$BIGLINUX_BRANCH" in
     stable)
+      add_community_testing | sudo tee -a "$config_file" >/dev/null
       add_biglinux_stable | sudo tee -a "$config_file" >/dev/null
       ;;
     testing)
