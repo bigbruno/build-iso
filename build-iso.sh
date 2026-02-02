@@ -388,13 +388,15 @@ add_cleanups() {
   sudo cp "$cleanup_script" "${cleanup_script}.backup"
   
   # Use specific pattern that only exists in the target file
-  if ! sudo grep -q "prepare_initramfs_img()" "$cleanup_script"; then
+  if ! sudo grep -q "^configure_live_image()" "$cleanup_script"; then
     msg_warning "Expected pattern not found in $cleanup_script"
     return 1
   fi
   
-  # Add cleanup function call with specific pattern
-  sudo sed -i '/^prepare_initramfs_img()/i \ \ mkiso_build_iso_cleanups "$1"' "$cleanup_script"
+  # Add cleanup function call at the beginning of configure_live_image
+  # This ensures cleanup runs before the live image is finalized
+  # Insert after "configure_live_image(){" line
+  sudo sed -i '/^configure_live_image(){$/a\    mkiso_build_iso_cleanups "$1"' "$cleanup_script"
   
   # Verify the modification was applied correctly
   if sudo grep -q "mkiso_build_iso_cleanups" "$cleanup_script"; then
