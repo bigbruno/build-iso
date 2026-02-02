@@ -85,7 +85,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [setup]
     container:
-      image: talesam/community-build:1.7.5
+      image: talesam/community-build:1.7.6
       options: --privileged
       volumes:
         - /mnt/var_lib_manjaro_tools_buildiso:/var/lib/manjaro-tools/buildiso

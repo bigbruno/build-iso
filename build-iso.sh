@@ -128,7 +128,7 @@ configure_repositories() {
   
   if [[ "$BRANCH" == "stable" ]]; then
     msg_info "Configuring compression level for stable branch"
-    sudo sed -i 's/-Xcompression-level [0-9]\+/-Xcompression-level 22/g' /usr/lib/manjaro-tools/util-iso.sh
+    sudo sed -i 's/-Xcompression-level [0-9]\+/-Xcompression-level 7/g' /usr/lib/manjaro-tools/util-iso.sh
   else
     msg_info "Configuring compression level for testing/unstable branch"
     sudo sed -i 's/-Xcompression-level [0-9]\+/-Xcompression-level 7/g' /usr/lib/manjaro-tools/util-iso.sh
@@ -345,17 +345,31 @@ setup_manjaro_tools() {
 }
 
 # Process remove files to remove packages from package files
+# Also copies remove files to root-overlay for post-install removal
 process_remove_files() {
+  local remove_dir="$PROFILE_PATH_EDITION/root-overlay/tmp/packages-remove"
+  
+  # Create directory for remove files in root-overlay
+  mkdir -p "$remove_dir"
+  
   for remove_file in Root-remove Live-remove Mhwd-remove Desktop-remove; do
     if [[ -f "$PROFILE_PATH_EDITION/$remove_file" ]]; then
+      # Copy remove file to root-overlay for post-install removal
+      msg_info "Copying $remove_file to root-overlay for post-install removal"
+      cp "$PROFILE_PATH_EDITION/$remove_file" "$remove_dir/"
+      
+      # Also remove from package list (prevents installation when possible)
       target_file="$PROFILE_PATH_EDITION/Packages-${remove_file%-remove}"
       if [[ -f "$target_file" ]]; then
         msg_info "Processing removals from $remove_file"
         while IFS= read -r package; do
-          sed -i "/^$package$/d" "$target_file"
+          # Skip empty lines and comments
+          [[ -z "$package" || "$package" =~ ^[[:space:]]*# ]] && continue
+          # Remove package prefix like ">multilib " if present
+          package_clean=$(echo "$package" | sed 's/^>[^ ]* //')
+          sed -i "/^${package_clean}$/d" "$target_file"
+          sed -i "/^>.*${package_clean}$/d" "$target_file"
         done < "$PROFILE_PATH_EDITION/$remove_file"
-      else
-        msg_warning "$target_file does not exist. Skipping removals."
       fi
     fi
   done
@@ -375,13 +389,15 @@ add_cleanups() {
   sudo cp "$cleanup_script" "${cleanup_script}.backup"
   
   # Use specific pattern that only exists in the target file
-  if ! sudo grep -q "prepare_initramfs_img()" "$cleanup_script"; then
+  if ! sudo grep -q "^configure_live_image()" "$cleanup_script"; then
     msg_warning "Expected pattern not found in $cleanup_script"
     return 1
   fi
   
-  # Add cleanup function call with specific pattern
-  sudo sed -i '/^prepare_initramfs_img()/i \ \ mkiso_build_iso_cleanups "$1"' "$cleanup_script"
+  # Add cleanup function call at the beginning of configure_live_image
+  # This ensures cleanup runs before the live image is finalized
+  # Insert after "configure_live_image(){" line
+  sudo sed -i '/^configure_live_image(){$/a\    mkiso_build_iso_cleanups "$1"' "$cleanup_script"
   
   # Verify the modification was applied correctly
   if sudo grep -q "mkiso_build_iso_cleanups" "$cleanup_script"; then
@@ -400,7 +416,37 @@ mkiso_build_iso_cleanups() {
   # Big cleanups
   local cpath="$1"
 
+  # ===========================================
+  # Post-install package removal
+  # ===========================================
+  local remove_dir="$cpath/tmp/packages-remove"
+  if [[ -d "$remove_dir" ]]; then
+    echo "[CLEANUP] Processing post-install package removals..."
+    for remove_file in "$remove_dir"/*-remove; do
+      if [[ -f "$remove_file" ]]; then
+        echo "[CLEANUP] Processing: $(basename "$remove_file")"
+        while IFS= read -r package; do
+          # Skip empty lines and comments
+          [[ -z "$package" || "$package" =~ ^[[:space:]]*# ]] && continue
+          # Remove package prefix like ">multilib " if present
+          package_clean=$(echo "$package" | sed 's/^>[^ ]* //')
+          # Check if package is installed
+          if chroot "$cpath" pacman -Qi "$package_clean" &>/dev/null; then
+            echo "[CLEANUP] Removing package: $package_clean"
+            chroot "$cpath" pacman -Rdd --noconfirm "$package_clean" 2>/dev/null || true
+          else
+            echo "[CLEANUP] Package not installed, skipping: $package_clean"
+          fi
+        done < "$remove_file"
+      fi
+    done
+    # Clean up the remove directory
+    rm -rf "$remove_dir"
+  fi
+
+  # ===========================================
   # Remove documentation
+  # ===========================================
   rm -rf "$cpath/usr/share/doc"/* 2> /dev/null
 
   # Remove man pages
