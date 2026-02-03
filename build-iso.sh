@@ -68,23 +68,46 @@ replicate() {
 prepare_directories() {
   msg "Preparing directories"
   
+  # Validate and extend sudo session for the entire build process
+  sudo -v
+  # Keep sudo session alive in background (renew every 50 seconds)
+  (while true; do sudo -n true; sleep 50; kill -0 "$$" 2>/dev/null || exit; done) &
+  
   # Create work directories if they don't exist
   mkdir -p "$WORK_PATH" &>/dev/null
   
   # Clean cache directories if they exist
-  local path_dirs=(
-    '/usr/share/manjaro-tools'
-    '/usr/lib/manjaro-tools'
-    '/var/lib/manjaro-tools/buildiso'
-    '/var/cache/manjaro-tools/iso'
-  )
-  
-  for cpath in "${path_dirs[@]}"; do
-    if [[ -d "$cpath" ]]; then
-      msg_info "Cleaning directory: $cpath"
-      sudo rm -rf "$cpath"/* || true
-    fi
-  done
+  # Skip cleaning system directories on local builds
+  if [[ "${LOCAL_BUILD:-false}" == "true" ]]; then
+    msg_info "Local build detected - restoring manjaro-tools to clean state"
+    
+    # Reinstall manjaro-tools packages to restore original files
+    # This is necessary because the script modifies these files
+    msg_info "Reinstalling manjaro-tools packages..."
+    sudo pacman -S --noconfirm manjaro-tools-iso-git manjaro-tools-base-git manjaro-tools-yaml-git &>/dev/null || true
+    
+    # Only clean cache directories on local builds
+    for cpath in '/var/lib/manjaro-tools/buildiso' '/var/cache/manjaro-tools/iso'; do
+      if [[ -d "$cpath" ]]; then
+        msg_info "Cleaning directory: $cpath"
+        sudo rm -rf "$cpath"/* || true
+      fi
+    done
+  else
+    local path_dirs=(
+      '/usr/share/manjaro-tools'
+      '/usr/lib/manjaro-tools'
+      '/var/lib/manjaro-tools/buildiso'
+      '/var/cache/manjaro-tools/iso'
+    )
+    
+    for cpath in "${path_dirs[@]}"; do
+      if [[ -d "$cpath" ]]; then
+        msg_info "Cleaning directory: $cpath"
+        sudo rm -rf "$cpath"/* || true
+      fi
+    done
+  fi
 }
 
 # Clone ISO profiles repository
@@ -128,7 +151,7 @@ configure_repositories() {
   
   if [[ "$BRANCH" == "stable" ]]; then
     msg_info "Configuring compression level for stable branch"
-    sudo sed -i 's/-Xcompression-level [0-9]\+/-Xcompression-level 7/g' /usr/lib/manjaro-tools/util-iso.sh
+    sudo sed -i 's/-Xcompression-level [0-9]\+/-Xcompression-level 20/g' /usr/lib/manjaro-tools/util-iso.sh
   else
     msg_info "Configuring compression level for testing/unstable branch"
     sudo sed -i 's/-Xcompression-level [0-9]\+/-Xcompression-level 7/g' /usr/lib/manjaro-tools/util-iso.sh
@@ -320,7 +343,7 @@ setup_manjaro_tools() {
   
   # Modify ISO filename format
   msg_info "Modifying ISO filename format"
-  sudo sed -i "s/_\${profile}\${_edition}_\${dist_release//./}/-live/" /usr/lib/manjaro-tools/util-iso.sh
+  sudo sed -i 's/_${profile}${_edition}_${dist_release\/\/\.\/}/-live/' /usr/lib/manjaro-tools/util-iso.sh
   
   # Configure profile
   msg_info "Setting profile path"
@@ -345,17 +368,18 @@ setup_manjaro_tools() {
 }
 
 # Process remove files to remove packages from package files
-# Also copies remove files to root-overlay for post-install removal
+# Also copies remove files to root-overlay for removal during image creation
 process_remove_files() {
-  local remove_dir="$PROFILE_PATH_EDITION/root-overlay/tmp/packages-remove"
+  # Use /var/lib instead of /tmp as /tmp is cleaned during build
+  local remove_dir="$PROFILE_PATH_EDITION/root-overlay/var/lib/packages-remove"
   
-  # Create directory for remove files in root-overlay
+  # Create directory for remove files
   mkdir -p "$remove_dir"
   
   for remove_file in Root-remove Live-remove Mhwd-remove Desktop-remove; do
     if [[ -f "$PROFILE_PATH_EDITION/$remove_file" ]]; then
-      # Copy remove file to root-overlay for post-install removal
-      msg_info "Copying $remove_file to root-overlay for post-install removal"
+      # Copy remove file to root-overlay for removal during image creation
+      msg_info "Copying $remove_file to root-overlay for package removal"
       cp "$PROFILE_PATH_EDITION/$remove_file" "$remove_dir/"
       
       # Also remove from package list (prevents installation when possible)
@@ -378,25 +402,32 @@ process_remove_files() {
 # Add cleanup functions to ISO build
 add_cleanups() {
   local cleanup_script="/usr/lib/manjaro-tools/util-iso-image.sh"
+  local iso_script="/usr/lib/manjaro-tools/util-iso.sh"
   
-  # Verify target file exists and create backup
+  # Verify target files exist
   if [[ ! -f "$cleanup_script" ]]; then
     msg_warning "Target script not found: $cleanup_script"
     return 1
   fi
   
-  # Create backup
-  sudo cp "$cleanup_script" "${cleanup_script}.backup"
+  if [[ ! -f "$iso_script" ]]; then
+    msg_warning "Target script not found: $iso_script"
+    return 1
+  fi
   
-  # Use specific pattern that only exists in the target file
+  # Create backups
+  sudo cp "$cleanup_script" "${cleanup_script}.backup"
+  sudo cp "$iso_script" "${iso_script}.backup"
+  
+  # =====================================================
+  # Part 1: Add cleanup function to util-iso-image.sh
+  # =====================================================
   if ! sudo grep -q "^configure_live_image()" "$cleanup_script"; then
     msg_warning "Expected pattern not found in $cleanup_script"
     return 1
   fi
   
   # Add cleanup function call at the beginning of configure_live_image
-  # This ensures cleanup runs before the live image is finalized
-  # Insert after "configure_live_image(){" line
   sudo sed -i '/^configure_live_image(){$/a\    mkiso_build_iso_cleanups "$1"' "$cleanup_script"
   
   # Verify the modification was applied correctly
@@ -404,12 +435,11 @@ add_cleanups() {
     msg_info "Cleanup function successfully added to $cleanup_script"
   else
     msg_warning "Failed to add cleanup function to $cleanup_script"
-    # Restore backup on failure
     sudo mv "${cleanup_script}.backup" "$cleanup_script"
     return 1
   fi
   
-  # Add cleanup function
+  # Add cleanup function definition
   sudo tee -a "$cleanup_script" >/dev/null <<-'EOF_CLEANUPS'
 
 mkiso_build_iso_cleanups() {
@@ -419,7 +449,7 @@ mkiso_build_iso_cleanups() {
   # ===========================================
   # Post-install package removal
   # ===========================================
-  local remove_dir="$cpath/tmp/packages-remove"
+  local remove_dir="$cpath/var/lib/packages-remove"
   if [[ -d "$remove_dir" ]]; then
     echo "[CLEANUP] Processing post-install package removals..."
     for remove_file in "$remove_dir"/*-remove; do
@@ -466,6 +496,38 @@ mkiso_build_iso_cleanups() {
   fi
 }
 EOF_CLEANUPS
+
+  # =====================================================
+  # Part 2: Add cleanup calls to util-iso.sh for rootfs and desktopfs
+  # This ensures packages are removed from installed system, not just live
+  # =====================================================
+  msg_info "Adding cleanup to rootfs and desktopfs image creation"
+  
+  # Add cleanup call to make_image_root (after copy_overlay)
+  # Find the line "reset_pac_conf" in make_image_root and add cleanup before it
+  if sudo grep -q "make_image_root()" "$iso_script"; then
+    # Insert cleanup call before reset_pac_conf in make_image_root
+    sudo sed -i '/^make_image_root()/,/^}$/{
+      /reset_pac_conf.*\${path}/i\        # Remove unwanted packages from rootfs\n        mkiso_build_iso_cleanups "${path}"
+    }' "$iso_script"
+    msg_info "Cleanup added to make_image_root"
+  fi
+  
+  # Add cleanup call to make_image_desktop (after copy_overlay)
+  if sudo grep -q "make_image_desktop()" "$iso_script"; then
+    # Insert cleanup call before reset_pac_conf in make_image_desktop
+    sudo sed -i '/^make_image_desktop()/,/^}$/{
+      /reset_pac_conf.*\${path}/i\        # Remove unwanted packages from desktopfs\n        mkiso_build_iso_cleanups "${path}"
+    }' "$iso_script"
+    msg_info "Cleanup added to make_image_desktop"
+  fi
+  
+  # Verify modifications
+  if sudo grep -q "mkiso_build_iso_cleanups" "$iso_script"; then
+    msg_info "Cleanup successfully added to all image creation functions"
+  else
+    msg_warning "Failed to add cleanup to $iso_script"
+  fi
 }
 
 # Patch manjaro-tools to respect the community-release package
@@ -676,14 +738,23 @@ build_iso() {
   
   # Execute buildiso
   msg_info "Executing buildiso command"
-  LC_ALL=C sudo -u "$USERNAME" bash -c "buildiso -q -v"
   
-  if $DEBUG; then
-    LC_ALL=C sudo -u "$USERNAME" bash -c "buildiso -d zstd -f -p $EDITION -b $MANJARO_BRANCH -k linux${KERNEL_NAME};exit \$?"
+  # For local builds, run buildiso directly as current user
+  # The script should already be run as the user who will build
+  if [[ "${LOCAL_BUILD:-false}" == "true" ]]; then
+    msg_info "Running buildiso with verbose output..."
+    LC_ALL=C buildiso -d zstd -f -p "$EDITION" -b "$MANJARO_BRANCH" -k "linux${KERNEL_NAME}"
+    BUILD_EXIT_CODE=$?
   else
-    LC_ALL=C sudo -u "$USERNAME" bash -c "buildiso -d zstd -f -p $EDITION -b $MANJARO_BRANCH -k linux${KERNEL_NAME} > /dev/null 2>&1; exit \$?"
+    # In CI/GitHub Actions, use sudo to switch user
+    LC_ALL=C sudo -u "$USERNAME" bash -c "buildiso -q -v"
+    if $DEBUG; then
+      LC_ALL=C sudo -u "$USERNAME" bash -c "buildiso -d zstd -f -p $EDITION -b $MANJARO_BRANCH -k linux${KERNEL_NAME};exit \$?"
+    else
+      LC_ALL=C sudo -u "$USERNAME" bash -c "buildiso -d zstd -f -p $EDITION -b $MANJARO_BRANCH -k linux${KERNEL_NAME} > /dev/null 2>&1; exit \$?"
+    fi
+    BUILD_EXIT_CODE=$?
   fi
-  BUILD_EXIT_CODE=$?
   
   # Check build result
   if [[ $BUILD_EXIT_CODE -ne 0 ]]; then
@@ -701,14 +772,15 @@ cleanup_and_move_files() {
   OUTPUT_ISO_PATH_NAME=$(find "$VAR_CACHE_MANJARO_TOOLS_ISO" -type f -name "*.iso" -exec stat -c '%Y %n' {} + | sort -nr | awk 'NR==1 {print $2}')
   FILE_PKG=$(find "$VAR_CACHE_MANJARO_TOOLS_ISO" -type f -name "*-pkgs.txt" -exec stat -c '%Y %n' {} + | sort -nr | awk 'NR==1 {print $2}')
   
-  # Update environment variables
-  {
-    echo "ISO_BASENAME=$ISO_BASENAME"
-    echo "OUTPUT_ISO_PATH_NAME=$OUTPUT_ISO_PATH_NAME"
-    echo "FILE_PKG=$FILE_PKG"
-  } >> "$GITHUB_ENV"
-  
-  echo "iso_path=$WORK_PATH/$ISO_BASENAME" >> "$GITHUB_OUTPUT"
+  # Update environment variables (only in GitHub Actions)
+  if [[ -n "${GITHUB_ENV:-}" ]]; then
+    {
+      echo "ISO_BASENAME=$ISO_BASENAME"
+      echo "OUTPUT_ISO_PATH_NAME=$OUTPUT_ISO_PATH_NAME"
+      echo "FILE_PKG=$FILE_PKG"
+    } >> "$GITHUB_ENV"
+    echo "iso_path=$WORK_PATH/$ISO_BASENAME" >> "$GITHUB_OUTPUT"
+  fi
   
   # Move files to work path
   msg_info "Moving ISO and PKG files to $WORK_PATH"
