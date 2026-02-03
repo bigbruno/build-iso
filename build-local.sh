@@ -402,7 +402,7 @@ build_iso() {
   export PATH_MANJARO_TOOLS="/usr/share/manjaro-tools"
   export VAR_CACHE_MANJARO_TOOLS="/var/cache/manjaro-tools"
   export VAR_CACHE_MANJARO_TOOLS_ISO="/var/cache/manjaro-tools/iso"
-  export SCOPE="full"
+  export SCOPE="minimal"
   export OFFICE="false"
   export RELEASE_TAG="$(date +%Y.%m.%d)"
   export DEBUG="false"
@@ -410,10 +410,18 @@ build_iso() {
   
   # Create work directory
   mkdir -p "$WORK_PATH"
+  mkdir -p "$OUTPUT_DIR"
   
   msg "Iniciando build da ISO..."
   msg_info "Este processo pode demorar de 30 minutos a 2 horas"
   echo
+  
+  # Validate sudo and keep it alive during the build
+  msg_info "Validando permissões sudo..."
+  sudo -v
+  # Keep sudo alive in background
+  (while true; do sudo -n true; sleep 60; kill -0 "$$" || exit; done 2>/dev/null) &
+  SUDO_KEEP_ALIVE_PID=$!
   
   # Run the main build script (using source to maintain environment)
   cd "$SCRIPT_DIR"
@@ -423,8 +431,27 @@ build_iso() {
   set -e
   
   if [[ $build_result -eq 0 ]]; then
+    # Kill sudo keep-alive process
+    kill $SUDO_KEEP_ALIVE_PID 2>/dev/null || true
+    
     msg_ok "ISO gerada com sucesso!"
-    msg_info "Arquivo disponível em: $OUTPUT_DIR"
+    
+    # Move ISO to output directory
+    local iso_cache_dir="/var/cache/manjaro-tools/iso/${DISTRO}/${EDITION}/${MANJARO_BRANCH}"
+    if [[ -d "$iso_cache_dir" ]]; then
+      msg_info "Movendo ISO para $OUTPUT_DIR..."
+      sudo mv "$iso_cache_dir"/*.iso "$OUTPUT_DIR/" 2>/dev/null || true
+      sudo mv "$iso_cache_dir"/*.sha* "$OUTPUT_DIR/" 2>/dev/null || true
+      sudo mv "$iso_cache_dir"/*.torrent "$OUTPUT_DIR/" 2>/dev/null || true
+      sudo chown "$USER:$USER" "$OUTPUT_DIR"/*.iso 2>/dev/null || true
+      sudo chown "$USER:$USER" "$OUTPUT_DIR"/*.sha* 2>/dev/null || true
+      sudo chown "$USER:$USER" "$OUTPUT_DIR"/*.torrent 2>/dev/null || true
+      msg_ok "ISO disponível em: $OUTPUT_DIR"
+      ls -lh "$OUTPUT_DIR"/*.iso 2>/dev/null || true
+    else
+      msg_warning "ISO gerada mas não encontrada em $iso_cache_dir"
+      msg_info "Verifique em /var/cache/manjaro-tools/iso/"
+    fi
     
     # Offer cleanup
     echo
@@ -433,6 +460,8 @@ build_iso() {
       cleanup_build
     fi
   else
+    # Kill sudo keep-alive process
+    kill $SUDO_KEEP_ALIVE_PID 2>/dev/null || true
     msg_warning "Falha ao gerar ISO. Verifique os logs acima."
   fi
   

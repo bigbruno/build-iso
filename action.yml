@@ -219,7 +219,7 @@ runs:
           echo "BIGLINUX_BRANCH=${{ inputs.biglinux_branch }}"
           echo "KERNEL=${{ inputs.kernel }}"
           echo "RELEASE_TAG=${{ inputs.release_tag }}"
-          echo "SCOPE=full"
+          echo "SCOPE=minimal"
           echo "OFFICE=false"
         } >> "$GITHUB_ENV"
 
